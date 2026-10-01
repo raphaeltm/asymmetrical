@@ -118,6 +118,75 @@ app.delete('/api/sessions/:id', (c) => {
   return c.json({ deleted: true });
 });
 
+// --- Hook ingest (auto-creates sessions) ---
+
+// Accepts Claude Code hook payloads or simple message posts.
+// If the session doesn't exist, it's created with a default or provided intent.
+app.post('/api/ingest', async (c) => {
+  const body = await c.req.json<{
+    session_id?: string;
+    sessionId?: string;
+    hook_name?: string;
+    tool_name?: string;
+    tool_input?: unknown;
+    tool_output?: unknown;
+    // Or a plain message
+    role?: string;
+    content?: string;
+    // Intent for auto-creation
+    intent?: string;
+  }>();
+
+  const sessionId = body.session_id ?? body.sessionId ?? 'default';
+  const intentDescription = body.intent ?? `Live monitoring session ${sessionId}`;
+
+  // Auto-create session if it doesn't exist
+  if (!sessions.get(sessionId)) {
+    sessions.create(sessionId, { description: intentDescription });
+    broadcast('session:created', { id: sessionId, intent: { description: intentDescription } });
+  }
+
+  // Convert hook payload to messages
+  const messages: Message[] = [];
+
+  if (body.tool_name && body.tool_input !== undefined) {
+    const inputStr = typeof body.tool_input === 'string' ? body.tool_input : JSON.stringify(body.tool_input);
+    messages.push({
+      role: 'tool_call',
+      content: inputStr.slice(0, 2000),
+      toolName: body.tool_name,
+      timestamp: Date.now(),
+    });
+  }
+
+  if (body.tool_name && body.tool_output !== undefined) {
+    const outputStr = typeof body.tool_output === 'string' ? body.tool_output : JSON.stringify(body.tool_output);
+    messages.push({
+      role: 'tool_result',
+      content: outputStr.slice(0, 2000),
+      toolName: body.tool_name,
+      timestamp: Date.now(),
+    });
+  }
+
+  if (body.role && body.content) {
+    messages.push({
+      role: body.role as Message['role'],
+      content: body.content,
+      timestamp: Date.now(),
+    });
+  }
+
+  let lastResult = null;
+  for (const msg of messages) {
+    const result = await sessions.pushMessage(sessionId, msg);
+    broadcast('message:new', { sessionId, message: msg });
+    if (result) lastResult = result;
+  }
+
+  return c.json({ sessionId, messagesIngested: messages.length, result: lastResult ?? undefined });
+});
+
 // --- Message ingest ---
 
 // Push a single message
