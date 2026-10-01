@@ -74,11 +74,26 @@ export class OpenAIDriftProvider implements DriftProvider {
 
   async check(intent: Intent, messages: Message[]): Promise<DriftResult> {
     const systemPrompt = [
-      'You are a drift detector. Analyze the following conversation and determine if it has drifted from the original intent.',
-      'Classify the drift using the classify_drift tool.',
-      'Consider scope creep, rabbit holes, wrong approaches, task confusion, and yak shaving.',
-      'Be concise in your explanation (max 150 characters).',
-    ].join(' ');
+      'You are a drift detector for AI coding agents.',
+      'Given an original task and a conversation transcript, determine whether the agent has drifted from its assigned task.',
+      'Call the classify_drift tool with your assessment.',
+      '',
+      'Drift types:',
+      '- none: Agent is making progress on the original task, even if taking reasonable intermediate steps.',
+      '- scope_creep: Agent is doing MORE than asked — adding features, refactoring code, or making changes beyond the task scope.',
+      '- rabbit_hole: Agent is stuck in a debugging spiral or exploring tangents that are not productive toward the goal.',
+      '- wrong_approach: Agent is solving the right problem but with a fundamentally wrong or unnecessarily complex strategy.',
+      '- task_confusion: Agent is working on a completely different task than what was assigned.',
+      '- yak_shaving: Agent is fixing prerequisites of prerequisites, getting further from the actual goal with each step.',
+      '',
+      'Severity guide:',
+      '- 0: On track. Normal progress toward the goal.',
+      '- 1: Minor tangent. Small deviation but likely to self-correct.',
+      '- 2: Significant drift. Agent has lost focus and is spending effort on the wrong things.',
+      '- 3: Completely off task. Agent is doing something unrelated to the original intent.',
+      '',
+      'Be concise in your explanation (max 150 chars). Focus on WHAT drifted, not restating the original task.',
+    ].join('\n');
 
     const constraintsBlock = intent.constraints?.length
       ? `\nConstraints: ${intent.constraints.join(', ')}`

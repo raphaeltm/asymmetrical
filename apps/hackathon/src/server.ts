@@ -7,6 +7,7 @@ import { OpenAIDriftProvider } from '@asymmetrical/provider-openai';
 import type { Message, Intent, DriftResult } from '@asymmetrical/core';
 import { SessionManager } from './sessions.js';
 import { GradiumClient, driftAlertText } from './gradium.js';
+import { allTranscripts } from './fixtures/index.js';
 
 // --- Config from env ---
 
@@ -161,6 +162,64 @@ app.post('/api/sessions/:id/check', async (c) => {
   } catch (err) {
     return c.json({ error: String(err) }, 404);
   }
+});
+
+// --- Fixtures (demo transcripts) ---
+
+app.get('/api/fixtures', (c) => {
+  const list = Object.entries(allTranscripts).map(([key, t]) => ({
+    id: key,
+    name: t.name,
+    description: t.description,
+    messageCount: t.messages.length,
+  }));
+  return c.json(list);
+});
+
+app.get('/api/fixtures/:id', (c) => {
+  const id = c.req.param('id') as keyof typeof allTranscripts;
+  const transcript = allTranscripts[id];
+  if (!transcript) return c.json({ error: 'Not found' }, 404);
+  return c.json(transcript);
+});
+
+// Replay a fixture with streaming — creates a session, sends messages with delay,
+// and broadcasts each step over WebSocket so the UI can animate it.
+app.post('/api/replay/:fixtureId', async (c) => {
+  const fixtureId = c.req.param('fixtureId') as keyof typeof allTranscripts;
+  const transcript = allTranscripts[fixtureId];
+  if (!transcript) return c.json({ error: 'Fixture not found' }, 404);
+
+  const body = await c.req.json<{ sessionId?: string; delayMs?: number }>().catch(() => ({}));
+  const sessionId = body.sessionId ?? `replay-${fixtureId}-${Date.now()}`;
+  const delayMs = body.delayMs ?? 300;
+
+  // Create session
+  sessions.create(sessionId, { description: transcript.intent });
+  broadcast('session:created', { id: sessionId, intent: { description: transcript.intent } });
+
+  // Send the response immediately with the session ID — replay runs in background
+  const replayPromise = (async () => {
+    const results: Array<{ index: number; result: DriftResult }> = [];
+    for (let i = 0; i < transcript.messages.length; i++) {
+      const msg = { ...transcript.messages[i], timestamp: Date.now() };
+      const result = await sessions.pushMessage(sessionId, msg);
+      broadcast('message:new', { sessionId, message: msg });
+      broadcast('replay:progress', { sessionId, index: i, total: transcript.messages.length });
+      if (result) results.push({ index: i, result });
+      if (i < transcript.messages.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    broadcast('replay:complete', { sessionId, totalMessages: transcript.messages.length, driftChecks: results.length });
+  })();
+
+  replayPromise.catch((err) => {
+    console.error('Replay error:', err);
+    broadcast('replay:error', { sessionId, error: String(err) });
+  });
+
+  return c.json({ sessionId, fixtureId, messageCount: transcript.messages.length, delayMs }, 202);
 });
 
 // --- WebSocket ---
