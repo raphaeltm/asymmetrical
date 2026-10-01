@@ -190,7 +190,7 @@ app.post('/api/replay/:fixtureId', async (c) => {
   const transcript = allTranscripts[fixtureId];
   if (!transcript) return c.json({ error: 'Fixture not found' }, 404);
 
-  const body = await c.req.json<{ sessionId?: string; delayMs?: number }>().catch(() => ({}));
+  const body = await c.req.json<{ sessionId?: string; delayMs?: number }>().catch(() => ({} as { sessionId?: string; delayMs?: number }));
   const sessionId = body.sessionId ?? `replay-${fixtureId}-${Date.now()}`;
   const delayMs = body.delayMs ?? 300;
 
