@@ -81,6 +81,26 @@ app.use('/*', cors());
 app.get('/', (c) => c.json({ status: 'ok', service: 'asymmetrical' }));
 app.get('/health', (c) => c.json({ healthy: true }));
 
+// Fleet overview — summary of all sessions' drift status
+app.get('/api/status', (c) => {
+  const sessionList = sessions.list();
+  const drifting = sessionList.filter((s) => s.lastResult?.isDrifting);
+  const maxSeverity = Math.max(0, ...sessionList.map((s) => s.lastResult?.severity ?? 0));
+  return c.json({
+    totalSessions: sessionList.length,
+    driftingSessions: drifting.length,
+    maxSeverity,
+    sessions: sessionList.map((s) => ({
+      id: s.id,
+      isDrifting: s.lastResult?.isDrifting ?? false,
+      severity: s.lastResult?.severity ?? 0,
+      severityLabel: s.lastResult?.severityLabel ?? 'No checks',
+      type: s.lastResult?.type ?? 'none',
+      messageCount: s.messageCount,
+    })),
+  });
+});
+
 // --- Session endpoints ---
 
 // Create a monitoring session
