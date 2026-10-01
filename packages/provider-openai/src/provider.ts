@@ -26,6 +26,10 @@ const CLASSIFY_DRIFT_TOOL: OpenAI.ChatCompletionTool = {
           type: 'boolean',
           description: 'Whether the conversation has drifted from the original intent.',
         },
+        confidence: {
+          type: 'number',
+          description: 'How confident you are in your drift assessment, from 0.0 (uncertain) to 1.0 (certain).',
+        },
         severity: {
           type: 'number',
           description: 'Severity of drift from 0 (on track) to 3 (completely off task).',
@@ -49,7 +53,7 @@ const CLASSIFY_DRIFT_TOOL: OpenAI.ChatCompletionTool = {
           maxLength: 150,
         },
       },
-      required: ['is_drifting', 'severity', 'type', 'explanation'],
+      required: ['is_drifting', 'confidence', 'severity', 'type', 'explanation'],
     },
   },
 };
@@ -137,20 +141,27 @@ export class OpenAIDriftProvider implements DriftProvider {
 
     const parsed = JSON.parse(toolCall.function.arguments) as {
       is_drifting: boolean;
+      confidence: number;
       severity: number;
       type: DriftType;
       explanation: string;
     };
 
     const severity = Math.max(0, Math.min(3, Math.round(parsed.severity)));
+    const confidence = Math.max(0, Math.min(1, parsed.confidence ?? 0.5));
+
+    // Probability: model's confidence adjusted by drift direction
+    // If drifting with high confidence → high probability
+    // If not drifting with high confidence → low probability
+    const probability = parsed.is_drifting ? confidence : 1 - confidence;
 
     return {
       isDrifting: parsed.is_drifting,
-      probability: parsed.is_drifting ? Math.max(0.6, severity / 3) : Math.min(0.4, severity / 3),
+      probability,
       severity,
       severityLabel: SEVERITY_LABELS[severity] ?? 'Unknown',
       type: parsed.type,
-      typeConfidence: parsed.is_drifting ? 0.8 : 0.5,
+      typeConfidence: confidence,
       explanation: parsed.explanation,
       checkedAt: Date.now(),
       messageCount: messages.length,
