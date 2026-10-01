@@ -25,6 +25,7 @@ export class GradiumClient {
   private readonly apiKey: string;
   private readonly baseURL: string;
   private readonly voiceId: string;
+  private readonly cache = new Map<string, TTSResult>();
 
   constructor(config: GradiumConfig) {
     this.apiKey = config.apiKey;
@@ -33,6 +34,9 @@ export class GradiumClient {
   }
 
   async synthesize(text: string): Promise<TTSResult> {
+    // Check cache — avoid re-synthesizing the same alert text
+    const cached = this.cache.get(text);
+    if (cached) return cached;
     const response = await fetch(`${this.baseURL}/speech/tts`, {
       method: 'POST',
       headers: {
@@ -74,10 +78,19 @@ export class GradiumClient {
     const totalLength = buffers.reduce((sum, b) => sum + b.length, 0);
     const combined = Buffer.concat(buffers, totalLength);
 
-    return {
+    const result: TTSResult = {
       audioBase64: combined.toString('base64'),
       sampleRate,
     };
+
+    // Cache the result (cap cache size to avoid memory issues)
+    if (this.cache.size > 50) {
+      const firstKey = this.cache.keys().next().value;
+      if (firstKey) this.cache.delete(firstKey);
+    }
+    this.cache.set(text, result);
+
+    return result;
   }
 }
 
