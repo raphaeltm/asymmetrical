@@ -61,6 +61,19 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  packages/provider-jev:
+    dependencies:
+      '@asymmetrical/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      tsup:
+        specifier: ^8.3.0
+        version: 8.5.1(tsx@4.23.15)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   packages/provider-openai:
     dependencies:
       '@asymmetrical/core':

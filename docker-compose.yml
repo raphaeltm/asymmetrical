@@ -1,0 +1,13 @@
+services:
+  asymmetrical:
+    build:
+      context: .
+      dockerfile: apps/hackathon/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEBIUS_TOKEN_FACTORY_API_KEY=${NEBIUS_TOKEN_FACTORY_API_KEY}
+      - GRADIUM_API_KEY=${GRADIUM_API_KEY}
+      - NEBIUS_MODEL=${NEBIUS_MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}
+      - PORT=3000
+    restart: unless-stopped
