@@ -4,9 +4,10 @@ import { createNodeWebSocket } from '@hono/node-ws';
 import { cors } from 'hono/cors';
 import type { WSContext } from 'hono/ws';
 import { OpenAIDriftProvider } from '@asymmetrical/provider-openai';
-import type { Message, Intent, DriftResult } from '@asymmetrical/core';
+import type { Message, Intent, DriftResult, DriftConfig } from '@asymmetrical/core';
 import { SessionManager } from './sessions.js';
 import { GradiumClient, driftAlertText } from './gradium.js';
+import { FIXTURES } from './fixtures.js';
 
 // --- Config from env ---
 
@@ -27,12 +28,14 @@ const provider = new OpenAIDriftProvider({
   model: NEBIUS_MODEL,
 });
 
-const sessions = new SessionManager(provider, {
+const defaultSessionConfig: DriftConfig = {
   checkInterval: 3,
   threshold: 0.5,
   windowSize: 30,
   maxTokenBudget: 24000,
-});
+};
+
+const sessions = new SessionManager(provider, defaultSessionConfig);
 
 const gradium = GRADIUM_API_KEY
   ? new GradiumClient({ apiKey: GRADIUM_API_KEY })
@@ -170,7 +173,20 @@ app.get(
   upgradeWebSocket(() => ({
     onOpen(_event, ws) {
       wsClients.add(ws);
-      ws.send(JSON.stringify({ event: 'connected', data: { sessions: sessions.list() }, ts: Date.now() }));
+      ws.send(
+        JSON.stringify({
+          event: 'connected',
+          data: {
+            sessions: sessions.list(),
+            config: {
+              threshold: defaultSessionConfig.threshold ?? 0.5,
+              checkInterval: defaultSessionConfig.checkInterval ?? 5,
+              windowSize: defaultSessionConfig.windowSize ?? 30,
+            },
+          },
+          ts: Date.now(),
+        }),
+      );
     },
     onClose(_event, ws) {
       wsClients.delete(ws);
@@ -291,21 +307,41 @@ function dashboardHTML(): string {
     .msg.tool_result { border-left-color: var(--orange); }
     .msg .role { font-weight: 600; font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
 
-    /* Timeline */
+    /* Timeline (SVG drift chart) */
     .timeline {
+      position: relative;
       display: flex; flex-direction: column; gap: 8px;
     }
-    .check-result {
-      padding: 10px; border-radius: 6px;
-      border-left: 4px solid var(--green);
-      background: rgba(34, 197, 94, 0.05);
-      font-size: 0.8rem;
+    .timeline svg { width: 100%; height: auto; display: block; }
+    .chart-tip {
+      position: absolute; z-index: 5; pointer-events: none;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      padding: 8px 10px; max-width: 260px;
+      font-size: 0.72rem; line-height: 1.4;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
     }
-    .check-result.drifting { border-left-color: var(--red); background: rgba(239, 68, 68, 0.05); }
-    .check-result.warning { border-left-color: var(--yellow); background: rgba(234, 179, 8, 0.05); }
-    .check-result .severity { font-weight: 700; font-size: 1rem; }
-    .check-result .meta { color: var(--text-muted); font-size: 0.75rem; margin-top: 4px; }
+    .chart-tip .tip-title { font-weight: 700; }
+    .chart-tip .tip-meta { color: var(--text-muted); }
+    .chart-legend {
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+      font-size: 0.7rem; color: var(--text-muted);
+    }
+    .chart-legend .key { display: inline-flex; align-items: center; gap: 5px; }
+    .chart-legend .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .chart-legend .dash { width: 16px; height: 0; border-top: 2px dashed var(--red); display: inline-block; }
 
+    /* Replay */
+    .progress-track {
+      height: 8px; background: var(--border); border-radius: 4px;
+      overflow: hidden; margin-top: 10px;
+    }
+    .progress-fill {
+      height: 100%; width: 0%;
+      background: var(--purple); border-radius: 4px;
+      transition: width 0.2s ease;
+    }
+    .replay-status { font-size: 0.72rem; color: var(--text-muted); align-self: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
     /* Severity bar */
     .severity-bar {
       height: 24px; display: flex; align-items: center; gap: 2px;
@@ -363,6 +399,23 @@ function dashboardHTML(): string {
         </div>
       </div>
 
+      <div class="panel" style="margin-bottom: 20px;">
+        <h2>Transcript Replay</h2>
+        <div class="form-row">
+          <select id="replay-demo" style="flex:1" onchange="loadFixture()">
+            <option value="">— load demo transcript —</option>
+          </select>
+          <button class="secondary" onclick="loadFixture()">Load</button>
+        </div>
+        <input id="replay-intent" placeholder="Agent intent (what it was asked to do)…" style="width:100%; margin-bottom:8px" />
+        <textarea id="replay-input" placeholder='Paste a JSON array of messages, e.g. [{"role":"user","content":"fix the bug"},{"role":"assistant","content":"reading the test file"}]'></textarea>
+        <div class="form-row" style="margin-top: 8px;">
+          <button id="replay-btn" onclick="replayTranscript()">Replay</button>
+          <span id="replay-status" class="replay-status" style="flex:1"></span>
+        </div>
+        <div class="progress-track"><div id="replay-progress" class="progress-fill"></div></div>
+      </div>
+
       <div class="panel">
         <h2>Sessions</h2>
         <div id="sessions-list"><p class="empty-state">No active sessions</p></div>
@@ -415,8 +468,33 @@ function dashboardHTML(): string {
     let ws;
     let activeSessionId = null;
     let sessionData = {};
+    let serverThreshold = 0.5;
+    let replaying = false;
+    const SEV_COLORS = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
 
-    // --- WebSocket ---
+// --- Demo transcript fixtures (for the dashboard replay UI) ---
+
+// List available demo transcripts (names only)
+app.get('/api/fixtures', (c) => {
+  return c.json(
+    FIXTURES.map((f) => ({
+      name: f.name,
+      description: f.description,
+      messageCount: f.messages.length,
+    })),
+  );
+});
+
+// Get one demo transcript by name
+app.get('/api/fixtures/:name', (c) => {
+  const fixture = FIXTURES.find((f) => f.name === c.req.param('name'));
+  if (!fixture) {
+    return c.json({ error: `Fixture "${c.req.param('name')}" not found`, available: FIXTURES.map((f) => f.name) }, 404);
+  }
+  return c.json(fixture);
+});
+
+// --- WebSocket ---
     function connect() {
       ws = new WebSocket(WS_URL);
       ws.onopen = () => {
@@ -434,10 +512,14 @@ function dashboardHTML(): string {
       };
     }
     connect();
+    loadFixtures();
 
     function handleEvent(event, data) {
       if (event === 'connected') {
-        // Initial session list
+        // Initial session list + server config (threshold for the chart)
+        if (data.config && typeof data.config.threshold === 'number') {
+          serverThreshold = data.config.threshold;
+        }
         if (data.sessions) {
           data.sessions.forEach(s => {
             sessionData[s.id] = sessionData[s.id] || { messages: [], checks: [] };
@@ -503,6 +585,110 @@ function dashboardHTML(): string {
       await fetch(BASE + '/api/sessions/' + activeSessionId + '/check', { method: 'POST' });
     }
 
+    // --- Transcript replay ---
+
+    function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+    async function loadFixtures() {
+      try {
+        const res = await fetch(BASE + '/api/fixtures');
+        const list = await res.json();
+        const sel = document.getElementById('replay-demo');
+        sel.innerHTML = '<option value="">— load demo transcript —</option>' +
+          list.map(f => '<option value="' + escapeHtml(f.name) + '">' + escapeHtml(f.name) + ' · ' + f.messageCount + ' msgs</option>').join('');
+      } catch (e) {
+        console.error('Failed to load fixtures:', e);
+      }
+    }
+
+    async function loadFixture() {
+      const sel = document.getElementById('replay-demo');
+      const name = sel.value;
+      if (!name) return;
+      try {
+        const res = await fetch(BASE + '/api/fixtures/' + encodeURIComponent(name));
+        if (!res.ok) throw new Error('fixture not found');
+        const fx = await res.json();
+        document.getElementById('replay-intent').value = fx.intent.description;
+        document.getElementById('replay-input').value = JSON.stringify(fx.messages, null, 2);
+        setReplayStatus('Loaded "' + name + '" — ' + fx.messages.length + ' messages. Hit Replay to watch drift build.');
+      } catch (e) {
+        setReplayStatus('Failed to load demo: ' + e.message);
+      }
+    }
+
+    function setReplayStatus(text) {
+      document.getElementById('replay-status').textContent = text;
+    }
+
+    function setReplayProgress(frac) {
+      document.getElementById('replay-progress').style.width = Math.round(frac * 100) + '%';
+    }
+
+    async function replayTranscript() {
+      if (replaying) return;
+      let messages;
+      try {
+        messages = JSON.parse(document.getElementById('replay-input').value);
+      } catch (e) {
+        setReplayStatus('Invalid JSON: ' + e.message);
+        return;
+      }
+      if (!Array.isArray(messages) || messages.length === 0) {
+        setReplayStatus('Paste a JSON array of messages to replay.');
+        return;
+      }
+
+      const intent = document.getElementById('replay-intent').value.trim() ||
+        'Replay of a pasted transcript — monitor the agent for drift.';
+
+      replaying = true;
+      const btn = document.getElementById('replay-btn');
+      btn.disabled = true;
+      setReplayProgress(0);
+
+      try {
+        // Create a dedicated session for the replay
+        const res = await fetch(BASE + '/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ intent: { description: intent } }),
+        });
+        const session = await res.json();
+        if (!session.id) throw new Error(session.error || 'failed to create session');
+        sessionData[session.id] = sessionData[session.id] || { messages: [], checks: [] };
+        selectSession(session.id);
+
+        // Send messages one-by-one with a visible delay so drift builds live
+        for (let i = 0; i < messages.length; i++) {
+          const m = messages[i] || {};
+          await fetch(BASE + '/api/sessions/' + session.id + '/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              role: m.role || 'user',
+              content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+              toolName: m.toolName,
+              timestamp: m.timestamp || Date.now(),
+            }),
+          });
+          setReplayProgress((i + 1) / messages.length);
+          setReplayStatus('Replaying… ' + (i + 1) + '/' + messages.length + ' messages');
+          await sleep(200);
+        }
+
+        // Evaluate whatever is left in the window
+        await fetch(BASE + '/api/sessions/' + session.id + '/check', { method: 'POST' });
+        setReplayProgress(1);
+        setReplayStatus('Done — ' + messages.length + ' messages replayed.');
+      } catch (e) {
+        setReplayStatus('Replay failed: ' + e.message);
+      } finally {
+        replaying = false;
+        btn.disabled = false;
+      }
+    }
+
     async function refreshSessions() {
       const res = await fetch(BASE + '/api/sessions');
       const list = await res.json();
@@ -541,14 +727,115 @@ function dashboardHTML(): string {
       el.scrollTop = el.scrollHeight;
     }
 
+    // --- Drift timeline chart (vanilla SVG) ---
+
+    function svgEl(tag, attrs) {
+      const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+      for (const k in attrs) el.setAttribute(k, attrs[k]);
+      return el;
+    }
+
+    function sevColor(severity) {
+      return SEV_COLORS[Math.max(0, Math.min(3, Math.round(severity)))];
+    }
+
     function renderTimeline() {
       const el = document.getElementById('timeline');
       const checks = sessionData[activeSessionId]?.checks || [];
-      if (checks.length === 0) { el.innerHTML = '<p class="empty-state">No checks yet</p>'; return; }
-      el.innerHTML = checks.map(r => {
-        const cls = r.isDrifting ? (r.severity >= 2 ? 'drifting' : 'warning') : '';
-        return '<div class="check-result ' + cls + '"><div class="severity">' + r.severityLabel + ' <span style="font-weight:400;font-size:0.8rem;color:var(--text-muted)">(' + r.type + ')</span></div><div>' + escapeHtml(r.explanation) + '</div><div class="meta">msgs: ' + r.messageCount + ' · tokens: ~' + r.windowTokenEstimate + '</div></div>';
-      }).join('');
+      el.innerHTML = '';
+      if (checks.length === 0) {
+        el.innerHTML = '<p class="empty-state">No checks yet</p>';
+        return;
+      }
+
+      const W = 640, H = 230;
+      const PAD = { l: 38, r: 14, t: 18, b: 28 };
+      const plotW = W - PAD.l - PAD.r;
+      const plotH = H - PAD.t - PAD.b;
+      const n = checks.length;
+      const xAt = i => PAD.l + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1));
+      const yAt = s => PAD.t + plotH - (Math.max(0, Math.min(3, s)) / 3) * plotH;
+
+      const svg = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': 'Drift severity over check number' });
+
+      // Horizontal gridlines + severity axis labels (0-3)
+      for (let s = 0; s <= 3; s++) {
+        const gy = yAt(s);
+        svg.appendChild(svgEl('line', { x1: PAD.l, y1: gy, x2: W - PAD.r, y2: gy, stroke: '#1e1e2e', 'stroke-width': 1 }));
+        const lbl = svgEl('text', { x: PAD.l - 8, y: gy + 4, fill: '#6b6b7b', 'font-size': 10, 'text-anchor': 'end' });
+        lbl.textContent = String(s);
+        svg.appendChild(lbl);
+      }
+
+      // X-axis labels (check numbers, thinned when crowded)
+      const step = Math.max(1, Math.ceil(n / 12));
+      for (let i = 0; i < n; i += step) {
+        const t = svgEl('text', { x: xAt(i), y: H - 8, fill: '#6b6b7b', 'font-size': 10, 'text-anchor': 'middle' });
+        t.textContent = '#' + (i + 1);
+        svg.appendChild(t);
+      }
+
+      // Threshold line — configured drift threshold (a probability, 0-1)
+      // mapped onto the 0-3 severity axis (e.g. 0.5 -> sev 1.5)
+      const tSev = Math.max(0, Math.min(3, serverThreshold * 3));
+      const ty = yAt(tSev);
+      svg.appendChild(svgEl('line', { x1: PAD.l, y1: ty, x2: W - PAD.r, y2: ty, stroke: '#ef4444', 'stroke-width': 1.5, 'stroke-dasharray': '6 4', opacity: 0.8 }));
+      const tLabel = svgEl('text', { x: W - PAD.r, y: ty - 6, fill: '#ef4444', 'font-size': 9, 'text-anchor': 'end' });
+      tLabel.textContent = 'threshold ' + serverThreshold;
+      svg.appendChild(tLabel);
+
+      // Line connecting the points
+      const points = checks.map((r, i) => xAt(i) + ',' + yAt(r.severity)).join(' ');
+      svg.appendChild(svgEl('polyline', { points: points, fill: 'none', stroke: '#a855f7', 'stroke-width': 1.5, opacity: 0.85 }));
+
+      // Points (colored by severity) with hover tooltips
+      checks.forEach((r, i) => {
+        const g = svgEl('g', {});
+        const title = svgEl('title', {});
+        title.textContent = 'Check #' + (i + 1) + ' — ' + r.type + ' (' + r.severityLabel + ')';
+        g.appendChild(title);
+        g.appendChild(svgEl('circle', { cx: xAt(i), cy: yAt(r.severity), r: 5, fill: sevColor(r.severity), stroke: '#0a0a0f', 'stroke-width': 1.5 }));
+        g.addEventListener('mouseenter', evt => showChartTip(el, evt, r, i));
+        g.addEventListener('mouseleave', () => hideChartTip());
+        svg.appendChild(g);
+      });
+
+      el.appendChild(svg);
+
+      // Legend
+      const legend = document.createElement('div');
+      legend.className = 'chart-legend';
+      legend.innerHTML =
+        '<span class="key"><span class="dot" style="background:#22c55e"></span>sev 0</span>' +
+        '<span class="key"><span class="dot" style="background:#eab308"></span>sev 1</span>' +
+        '<span class="key"><span class="dot" style="background:#f97316"></span>sev 2</span>' +
+        '<span class="key"><span class="dot" style="background:#ef4444"></span>sev 3</span>' +
+        '<span class="key"><span class="dash"></span>threshold</span>';
+      el.appendChild(legend);
+    }
+
+    function showChartTip(container, evt, r, i) {
+      hideChartTip();
+      const tip = document.createElement('div');
+      tip.className = 'chart-tip';
+      tip.id = 'chart-tip';
+      tip.innerHTML =
+        '<div class="tip-title" style="color:' + sevColor(r.severity) + '">Check #' + (i + 1) + ' · ' + escapeHtml(String(r.type)) + '</div>' +
+        '<div class="tip-meta">' + escapeHtml(String(r.severityLabel)) + ' · sev ' + r.severity + ' · prob ' + (typeof r.probability === 'number' ? r.probability.toFixed(2) : '—') + (typeof r.messageCount === 'number' ? ' · ' + r.messageCount + ' msgs' : '') + '</div>' +
+        '<div style="margin-top:4px">' + escapeHtml(String(r.explanation || '')) + '</div>';
+      container.appendChild(tip);
+      const rect = container.getBoundingClientRect();
+      let left = evt.clientX - rect.left + 12;
+      let top = evt.clientY - rect.top + 12;
+      if (left + 270 > rect.width) left = Math.max(0, left - 284);
+      if (top + 120 > rect.height) top = Math.max(0, top - 130);
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }
+
+    function hideChartTip() {
+      const old = document.getElementById('chart-tip');
+      if (old) old.remove();
     }
 
     function renderStatus(result) {
