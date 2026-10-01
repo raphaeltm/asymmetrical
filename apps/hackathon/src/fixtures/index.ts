@@ -1,1 +1,7 @@
-export { scopeCreepTranscript, rabbitHoleTranscript, yakShavingTranscript, allTranscripts } from './transcripts.js';
+export {
+  scopeCreepTranscript,
+  rabbitHoleTranscript,
+  yakShavingTranscript,
+  allTranscripts,
+  type TranscriptFixture,
+} from './transcripts.js';
